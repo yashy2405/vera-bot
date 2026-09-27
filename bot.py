@@ -288,12 +288,22 @@ def compose_festival(category: dict, merchant: dict, trigger: dict) -> ComposedM
     days = payload.get("days_until")
     days_txt = f"in {days} days" if isinstance(days, int) else "soon"
     offer = pick_active_offer(merchant)
-    offer_txt = f" Want to feature \"{offer['title']}\" for it?" if offer else " Want me to draft a festival post?"
-    body = f"{name}, {festival} is {days_txt}.{offer_txt}"
+    if isinstance(days, int) and days > 60:
+        # Too far out to ask for an immediate decision, but salons/restaurants genuinely
+        # do prep festival offers months ahead — give a real, offer-grounded reason to act now.
+        if offer:
+            body = f"{name}, {festival} is {days_txt} — with that much lead time, want to get an early {festival} push ready around your \"{offer['title']}\", before searches start ramping up?"
+        else:
+            body = f"{name}, {festival} is {days_txt}. Worth locking in an early offer before the rush — want me to draft one?"
+        cta = "binary_yes_no"
+    else:
+        offer_txt = f" Want to feature \"{offer['title']}\" for it?" if offer else " Want me to draft a festival post?"
+        body = f"{name}, {festival} is {days_txt}.{offer_txt}"
+        cta = "binary_yes_no"
     return ComposedMessage(
-        body=body, cta="binary_yes_no", send_as="vera",
+        body=body, cta=cta, send_as="vera",
         suppression_key=trigger.get("suppression_key", f"festival:{trigger.get('id')}"),
-        rationale="Seasonal/festival timing trigger; ties to merchant's real active offer when available.",
+        rationale="Seasonal/festival timing trigger; framing scales with real days-until so far-out festivals aren't pitched as urgent decisions.",
     )
 
 
@@ -333,19 +343,25 @@ def compose_perf_dip_v2(category: dict, merchant: dict, trigger: dict) -> Compos
 
 
 def compose_seasonal_perf_dip(category: dict, merchant: dict, trigger: dict) -> ComposedMessage:
-    """A dip that's EXPECTED for the season — reassuring tone, not alarming."""
+    """A dip that's EXPECTED for the season — reassuring tone, not alarming, but still
+    gives a concrete, offer-grounded reason to reply now rather than a generic "post something"."""
     name = salutation(category, merchant)
     payload = trigger.get("payload", {})
     metric = payload.get("metric", "activity")
     delta_pct = payload.get("delta_pct")
     pct_txt = f"{abs(int(delta_pct * 100))}%" if isinstance(delta_pct, (int, float)) else "a bit"
     note = payload.get("season_note", "").replace("_", " ")
-    note_txt = f" — this is normal, {note}" if note else " — this is a normal seasonal pattern"
-    body = f"{name}, {metric} is down {pct_txt} this week{note_txt}. No action needed, but want a quick post to keep momentum in the meantime?"
+    note_txt = f" — normal for {note}" if note else " — a normal seasonal pattern"
+    offer = pick_active_offer(merchant)
+    if offer:
+        cta_txt = f" Good time to push your \"{offer['title']}\" a bit harder while it's quiet — want me to schedule a post for it?"
+    else:
+        cta_txt = " Good time to post something and stay visible while it's quiet — want a quick draft?"
+    body = f"{name}, {metric} is down {pct_txt} this week{note_txt}, nothing wrong on your end.{cta_txt}"
     return ComposedMessage(
         body=body, cta="binary_yes_no", send_as="vera",
         suppression_key=trigger.get("suppression_key", f"seasonal_dip:{trigger.get('id')}"),
-        rationale="Expected seasonal dip flagged as is_expected_seasonal=true; reassuring, non-alarmist framing to avoid false urgency.",
+        rationale="Expected seasonal dip; stays honest about there being no real problem, and ties the CTA to the merchant's real active offer when available for stronger category/merchant fit.",
     )
 
 
@@ -398,28 +414,43 @@ def compose_ipl_match(category: dict, merchant: dict, trigger: dict) -> Composed
 
 def compose_active_planning_intent(category: dict, merchant: dict, trigger: dict) -> ComposedMessage:
     """Merchant is mid-conversation planning something (e.g. kids yoga camp, corporate thali) —
-    proactively follow up with a concrete next step, not another qualifying question."""
+    proactively follow up with a concrete next step, quoting their own real last message for
+    genuine personalization instead of inventing numbers we don't have."""
     name = salutation(category, merchant)
     payload = trigger.get("payload", {})
     topic = payload.get("intent_topic", "that idea").replace("_", " ")
-    body = f"{name}, following up on {topic} — want me to draft the plan now so you can review it?"
+    last_msg = payload.get("merchant_last_message", "").strip()
+    if last_msg:
+        # Light paraphrase cue rather than a bare repeat, using only what they actually said.
+        body = f"{name}, following up on {topic} — you'd asked \"{last_msg}\". Want me to draft the plan now, with schedule and pricing options, so you can just review?"
+    else:
+        body = f"{name}, following up on {topic} — want me to draft the plan now so you can review it?"
     return ComposedMessage(
         body=body, cta="binary_confirm_cancel", send_as="vera",
         suppression_key=trigger.get("suppression_key", f"planning:{trigger.get('id')}"),
-        rationale="Merchant already expressed planning intent in conversation history; following up with concrete next step, not re-qualifying.",
+        rationale="Merchant already expressed planning intent in conversation history; quotes their real last message for genuine specificity rather than inventing figures we don't have, and follows up with a concrete next step instead of re-qualifying.",
     )
 
 
 def compose_curious_ask(category: dict, merchant: dict, trigger: dict) -> ComposedMessage:
-    """Lever #7 — ask the merchant something, don't just tell them things."""
+    """Lever #7 — ask the merchant something, don't just tell them things.
+    Anchored with a real performance number where available, so the question
+    doesn't read as content-free."""
     name = salutation(category, merchant)
     payload = trigger.get("payload", {})
     template = payload.get("ask_template", "")
     questions = {
-        "what_service_in_demand_this_week": "What's your most-asked-for service this week?",
+        "what_service_in_demand_this_week": "what's your most-asked-for service this week",
     }
-    question = questions.get(template, template.replace("_", " ").capitalize() + "?")
-    body = f"{name}, quick one — {question} Curious what's trending on your end."
+    question = questions.get(template, template.replace("_", " ") + "?")
+    perf = merchant.get("performance", {})
+    leads = perf.get("leads")
+    window = perf.get("window_days")
+    if leads is not None:
+        anchor = f"You picked up {leads} leads" + (f" in the last {window} days" if window else "") + " — "
+    else:
+        anchor = ""
+    body = f"{name}, quick one — {anchor}{question}? Curious what's driving it on your end."
     return ComposedMessage(
         body=body, cta="open_ended", send_as="vera",
         suppression_key=trigger.get("suppression_key", f"curious_ask:{trigger.get('id')}"),
@@ -963,11 +994,43 @@ async def healthz():
 @app.get("/v1/metadata")
 async def metadata():
     return {
-        "team_name": "REPLACE_ME",
-        "team_members": ["REPLACE_ME"],
+        "team_name": "Yash",
+        "team_members": ["Yash"],
         "model": "deterministic-template-composer-v1",
         "approach": "Rule-based composer dispatching on trigger.kind, slot-filling only from provided context fields; no LLM call, guaranteeing zero hallucination. Reply endpoint uses phrase-based auto-reply/opt-out/intent-transition detection with a 5-turn cap.",
-        "contact_email": "REPLACE_ME@example.com",
+        "contact_email": "yashyadav120905@gmail.com",
         "version": "0.1.0",
         "submitted_at": datetime.utcnow().isoformat() + "Z",
+    }
+
+
+# ---------------------------------------------------------------------------
+# /v1/compose — safety-net alias. Some spec summaries reference a single
+# "/v1/compose" endpoint instead of the context/tick split; this exposes the
+# same deterministic composer directly, in case anything calls it by that
+# name. It does NOT replace /v1/context + /v1/tick, which is what the actual
+# judge_simulator.py we tested against calls.
+# ---------------------------------------------------------------------------
+
+class ComposeBody(BaseModel):
+    category: dict[str, Any]
+    merchant: dict[str, Any]
+    trigger: dict[str, Any]
+    customer: Optional[dict[str, Any]] = None
+
+
+@app.post("/v1/compose")
+async def compose_endpoint(body: ComposeBody):
+    try:
+        composed = compose(body.category, body.merchant, body.trigger, body.customer)
+    except Exception as e:
+        return {"body": None, "cta": "none", "send_as": "vera", "error": str(e)}
+    if composed is None:
+        return {"body": None, "cta": "none", "send_as": "vera", "rationale": "No message composed — likely a customer-scope trigger with no customer context provided."}
+    return {
+        "body": composed.body,
+        "cta": composed.cta,
+        "send_as": "merchant" if composed.send_as == "merchant_on_behalf" else composed.send_as,
+        "suppression_key": composed.suppression_key,
+        "rationale": composed.rationale,
     }
